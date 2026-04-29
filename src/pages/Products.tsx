@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react"
+import { Edit2, Save, X, Upload } from "lucide-react"
 import { supabase } from "../lib/supabase"
 
 type Product = {
   id: string
   name: string
-  description: string | null
   image_url: string | null
   price: number
   stock: number
@@ -18,10 +18,24 @@ type Product = {
   }[] | null
 }
 
+type EditState = {
+  price: string
+  imageFile: File | null
+}
+
+const createImagePath = (productId: string, fileName: string) =>
+  `products/${productId}/${crypto.randomUUID()}-${fileName}`
+
 export default function Products() {
   const [products, setProducts] = useState<Product[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [editingProductId, setEditingProductId] = useState<string | null>(null)
+  const [editState, setEditState] = useState<EditState>({
+    price: "",
+    imageFile: null,
+  })
+  const [savingProductId, setSavingProductId] = useState<string | null>(null)
 
   useEffect(() => {
     let isMounted = true
@@ -29,7 +43,7 @@ export default function Products() {
     const loadProducts = async () => {
       const { data, error } = await supabase
         .from("products")
-        .select("*, product_images(image_url, position, is_main)")
+        .select("id, name, image_url, price, stock, category, level, created_at, product_images(image_url, position, is_main)")
         .order("created_at", { ascending: false })
 
       if (!isMounted) return
@@ -49,6 +63,106 @@ export default function Products() {
       isMounted = false
     }
   }, [])
+
+  const startEditing = (product: Product) => {
+    setEditingProductId(product.id)
+    setEditState({
+      price: String(product.price),
+      imageFile: null,
+    })
+  }
+
+  const cancelEditing = () => {
+    setEditingProductId(null)
+    setEditState({
+      price: "",
+      imageFile: null,
+    })
+  }
+
+  const handleSave = async (product: Product) => {
+    setSavingProductId(product.id)
+
+    try {
+      const parsedPrice = Number(editState.price)
+
+      if (Number.isNaN(parsedPrice)) {
+        throw new Error("Please enter a valid price")
+      }
+
+      const updatePayload: { price: number; image_url?: string } = {
+        price: parsedPrice,
+      }
+
+      let uploadedImageUrl: string | null = null
+
+      if (editState.imageFile) {
+        const filePath = createImagePath(product.id, editState.imageFile.name)
+        const { error: uploadError } = await supabase.storage
+          .from("product-images")
+          .upload(filePath, editState.imageFile)
+
+        if (uploadError) throw uploadError
+
+        uploadedImageUrl = supabase.storage
+          .from("product-images")
+          .getPublicUrl(filePath).data.publicUrl
+
+        updatePayload.image_url = uploadedImageUrl
+      }
+
+      const { error: updateError } = await supabase
+        .from("products")
+        .update(updatePayload)
+        .eq("id", product.id)
+
+      if (updateError) throw updateError
+
+      if (uploadedImageUrl) {
+        const { error: imageUpdateError } = await supabase
+          .from("product_images")
+          .update({ image_url: uploadedImageUrl })
+          .eq("product_id", product.id)
+          .eq("is_main", true)
+
+        if (imageUpdateError) {
+          const { error: fallbackImageUpdateError } = await supabase
+            .from("product_images")
+            .update({ image_url: uploadedImageUrl })
+            .eq("product_id", product.id)
+            .eq("position", 0)
+
+          if (fallbackImageUpdateError) throw fallbackImageUpdateError
+        }
+      }
+
+      setProducts((current) =>
+        current.map((item) =>
+          item.id === product.id
+            ? {
+                ...item,
+                price: parsedPrice,
+                image_url: uploadedImageUrl ?? item.image_url,
+                product_images: uploadedImageUrl
+                  ? item.product_images?.map((image) =>
+                      image.is_main || image.position === 0
+                        ? { ...image, image_url: uploadedImageUrl }
+                        : image
+                    ) ?? item.product_images
+                  : item.product_images,
+              }
+            : item
+        )
+      )
+
+      cancelEditing()
+    } catch (saveError) {
+      console.error(saveError)
+      alert(saveError instanceof Error ? saveError.message : "Failed to update product")
+    } finally {
+      setSavingProductId(null)
+    }
+  }
 
   return (
     <div>
@@ -75,12 +189,12 @@ export default function Products() {
             <thead className="bg-gray-100">
               <tr>
                 <th className="p-3">Name</th>
-                <th className="p-3">Description</th>
                 <th className="p-3">Images</th>
                 <th className="p-3">Category</th>
                 <th className="p-3">Level</th>
                 <th className="p-3">Price</th>
                 <th className="p-3">Stock</th>
+                <th className="p-3">Actions</th>
                 <th className="p-3">Created</th>
               </tr>
             </thead>
@@ -90,10 +204,6 @@ export default function Products() {
                 <tr key={p.id} className="border-t">
 
                   <td className="p-3 font-medium">{p.name}</td>
-
-                  <td className="p-3 text-gray-600">
-                    {p.description || "-"}
-                  </td>
 
                   <td className="p-3">
                     <div className="flex flex-wrap gap-2">
@@ -120,11 +230,71 @@ export default function Products() {
                   </td>
 
                   <td className="p-3">
-                    KES {p.price}
+                    {editingProductId === p.id ? (
+                      <input
+                        type="number"
+                        value={editState.price}
+                        onChange={(e) => setEditState((current) => ({ ...current, price: e.target.value }))}
+                        className="w-28 rounded-lg border px-3 py-2"
+                      />
+                    ) : (
+                      `KES ${p.price}`
+                    )}
                   </td>
 
                   <td className="p-3">
                     {p.stock}
+                  </td>
+
+                  <td className="p-3">
+                    {editingProductId === p.id ? (
+                      <div className="space-y-3">
+                        <label className="block">
+                          <span className="mb-1 block text-xs font-medium text-gray-500">Replace image</span>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={(e) => setEditState((current) => ({ ...current, imageFile: e.target.files?.[0] || null }))}
+                              className="w-full text-sm"
+                            />
+                          </div>
+                        </label>
+                        {editState.imageFile && (
+                          <p className="text-xs text-green-600 flex items-center gap-1">
+                            <Upload size={14} /> {editState.imageFile.name}
+                          </p>
+                        )}
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void handleSave(p)}
+                            disabled={savingProductId === p.id}
+                            className="inline-flex items-center gap-1 rounded-lg bg-black px-3 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-60"
+                          >
+                            <Save size={16} />
+                            {savingProductId === p.id ? "Saving..." : "Save"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelEditing}
+                            className="inline-flex items-center gap-1 rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+                          >
+                            <X size={16} />
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => startEditing(p)}
+                        className="inline-flex items-center gap-1 rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+                      >
+                        <Edit2 size={16} />
+                        Edit
+                      </button>
+                    )}
                   </td>
 
                   <td className="p-3 text-gray-500 text-sm">
